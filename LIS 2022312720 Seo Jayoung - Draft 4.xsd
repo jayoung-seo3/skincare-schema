@@ -1,0 +1,909 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ============================================================
+  DRAFT 4: 한국 스킨케어 제품 발견 및 개인화 추천 메타데이터 스키마
+
+  작성자: 서재영 (2022312720)
+  과목: LIS — 메타데이터 스키마 설계
+
+  [전체 설계 의도]
+  이 스키마는 구조화된 제품 속성(성분, 텍스처, 카테고리)을
+  사용자 피부 프로필 및 사용 맥락과 연결함으로써,
+  개인화된 스킨케어 제품 추천을 지원하기 위해 설계되었다.
+  단순한 제품 목록이 아닌, 제품과 사용자 사이의 매칭 로직을
+  메타데이터 수준에서 구조화하는 것이 핵심 목표이다.
+  기존 표준으로 커버되지 않는 도메인 특화 요소에는
+  로컬 네임스페이스 skc: 를 사용한다.
+
+  외부 표준 활용 방식:
+    - Dublin Core (dc): 제목, 설명 등 일반 기술 메타데이터
+      → dc.xsd에 전역 선언되어 있으므로 xs:import + ref= 방식으로 참조
+    - Schema.org (schema): 브랜드/제품 속성
+      → 공개 XSD에 전역 선언 요소 없음 → skc: 로컬 재선언
+    - FOAF (foaf): 사용자 프로필 요소 (연령대)
+      → FOAF는 공식 XSD 파일을 배포하지 않음.
+         foaf:age를 ref= 방식으로 참조하는 것이 불가능하므로
+         skc:targetAgeRange로 로컬 재선언하고 출처 URI를 어노테이션에 명시함.
+         xs:import를 시도하면 파서가 .rdf 파일을 읽지 못하므로 import하지 않음.
+    - GoodRelations (gr): 가격 명세
+      → 공개 XSD에 전역 선언 요소 없음 → skc: 로컬 재선언
+
+  [AI 어시스턴트 사용 고지]
+  Claude (Anthropic)를 코딩 어시스턴트로 활용하여 XSD 문법 구조를 잡는 데
+  도움을 받았다. 요소명, 정의, 통제 어휘, 카디널리티 규칙, 설계 근거는
+  모두 Draft 1~3에서 직접 도출하였다. 생성된 코드는 데이터 사전과
+  정확히 일치하도록 작성자가 전부 검토하고 수정하였다.
+  주요 수정 사항: foaf xs:import 제거(RDF 파일은 XSD 파서가 읽지 못함),
+  xs:all 내 요소 maxOccurs 제약 준수 확인, XML 기본 네임스페이스 선언 방식 수정.
+  ============================================================
+-->
+
+<xs:schema
+  xmlns:xs="http://www.w3.org/2001/XMLSchema"
+  xmlns="https://example.org/skincare#"
+  xmlns:skc="https://example.org/skincare#"
+  xmlns:dc="http://purl.org/dc/elements/1.1/"
+  targetNamespace="https://example.org/skincare#"
+  elementFormDefault="qualified">
+
+  <!-- ============================================================
+       외부 스키마 가져오기 (xs:import)
+
+       [설계 의도]
+       Dublin Core는 dc.xsd에 전역 선언된 요소들이 있어
+       xs:import + ref= 방식으로 직접 참조할 수 있다.
+
+       Schema.org, FOAF, GoodRelations는 아래 이유로 import하지 않는다:
+         - Schema.org: 표준 XSD 파일 자체를 배포하지 않음
+         - FOAF: 공식 스펙이 RDF/OWL 형식으로만 배포되며
+                 XSD 파서가 읽을 수 있는 .xsd 파일이 없음
+         - GoodRelations: XSD를 배포하지만 사용하려는 속성이
+                          전역 요소로 선언되어 있지 않음
+       위 세 표준의 어휘는 skc: 로컬 요소로 재선언하고
+       각 요소의 xs:documentation에 출처 URI를 명시한다.
+       ============================================================ -->
+
+  <xs:import
+    namespace="http://purl.org/dc/elements/1.1/"
+    schemaLocation="https://dublincore.org/schemas/xmls/qdc/dc.xsd"/>
+
+
+  <!-- ============================================================
+       루트 요소: skc:catalog
+
+       [설계 의도]
+       여러 제품 레코드를 하나의 파일에 담을 수 있도록
+       catalog 래퍼를 루트로 설정했다.
+       skincareProduct를 단독 루트로 두면 다중 레코드 파일을
+       만들 수 없어 실용성이 떨어진다고 판단했다.
+       ============================================================ -->
+  <xs:element name="catalog">
+    <xs:annotation>
+      <xs:documentation>
+        스킨케어 제품 레코드 컬렉션의 루트 컨테이너 요소.
+        하나의 catalog 요소 안에 하나 이상의 skincareProduct 자식 요소를 포함한다.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element ref="skc:skincareProduct" maxOccurs="unbounded"/>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+
+  <!-- ============================================================
+       skc:skincareProduct — 개별 제품 레코드 요소
+
+       [설계 의도]
+       xs:sequence 대신 xs:sequence를 사용하여 요소 순서를 고정한다.
+       xs:all은 XSD 1.0에서 내부 요소의 maxOccurs를 0 또는 1로만
+       제한하는데, 래퍼 요소(targetSkinTypes 등)가 익명 complexType을
+       가질 경우 일부 파서에서 문제가 생길 수 있어 xs:sequence로 변경했다.
+       필수 여부는 minOccurs로 각 요소에 명시한다.
+       ============================================================ -->
+  <xs:element name="skincareProduct">
+    <xs:annotation>
+      <xs:documentation>
+        한국 스킨케어 제품 단일 레코드.
+        개인화 추천 매칭에 필요한 기술적·기능적·관계적 메타데이터를 모두 포함한다.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:complexType>
+      <xs:sequence>
+
+        <!-- ── 요소 1: dc:title ──────────────────────────────── -->
+        <!-- [설계 의도]
+             Dublin Core XSD의 dc:title을 ref= 방식으로 직접 참조하여
+             DC 기반 시스템과의 상호운용성을 확보한다.
+             모든 제품에는 식별 가능한 이름이 반드시 있어야 하므로
+             minOccurs="1"로 필수 설정한다. -->
+        <xs:element ref="dc:title" minOccurs="1" maxOccurs="1"/>
+
+        <!-- ── 요소 2: skc:brand ─────────────────────────────── -->
+        <!-- [설계 의도]
+             schema:brand는 전역 선언된 XSD 요소가 없으므로
+             skc:brand로 로컬 재선언하고 출처 URI를 documentation에 명시한다.
+             통제 열거형으로 테스트 코퍼스의 브랜드만 허용하여
+             데이터 입력 일관성을 보장한다. -->
+        <xs:element name="brand" type="skc:BrandType" minOccurs="1" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              제품의 브랜드 또는 제조사.
+              출처: https://schema.org/brand
+              브랜드의 공식 영문 로마자 표기명을 사용한다.
+              필수 | 반복 불가.
+            </xs:documentation>
+          </xs:annotation>
+        </xs:element>
+
+        <!-- ── 요소 3: skc:productCategory ──────────────────── -->
+        <!-- [설계 의도]
+             한국 루틴 단계 체계에서 제품은 정확히 하나의
+             주요 카테고리에 속한다. 필수, 반복 불가.
+             통제 열거형(부록 A)으로 자유 텍스트 입력을 막아
+             루틴 시퀀싱 로직의 안정성을 확보한다. -->
+        <xs:element name="productCategory" type="skc:ProductCategoryType" minOccurs="1" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              한국 스킨케어 루틴 내 제품의 기능적 카테고리.
+              URI: https://example.org/skincare#productCategory
+              부록 A — 스킨케어 카테고리 어휘에서 값을 선택한다.
+              필수 | 반복 불가.
+            </xs:documentation>
+          </xs:annotation>
+        </xs:element>
+
+        <!-- ── 요소 4: skc:targetSkinTypes ──────────────────── -->
+        <!-- [설계 의도]
+             피부 타입 매칭이 추천의 핵심 기준이므로 필수 래퍼로 설정한다.
+             하나의 제품이 여러 피부 타입에 적합할 수 있으므로
+             자식 요소 targetSkinType을 1~8개 반복 허용한다. -->
+        <xs:element name="targetSkinTypes" minOccurs="1" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              하나 이상의 피부 타입 값을 담는 컨테이너.
+              URI: https://example.org/skincare#targetSkinType
+              필수 | 자식 요소 반복 가능 (1~8개).
+            </xs:documentation>
+          </xs:annotation>
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="targetSkinType" type="skc:SkinTypeType"
+                          minOccurs="1" maxOccurs="8"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+
+        <!-- ── 요소 5: skc:targetSkinConcerns ───────────────── -->
+        <!-- [설계 의도]
+             targetSkinType과 함께 제품-사용자 매칭의 1차 로직을 구동한다.
+             하나의 제품이 복수의 피부 고민을 다루는 경우가 많으므로
+             자식 요소를 1~12개 반복 허용한다. 필수 래퍼. -->
+        <xs:element name="targetSkinConcerns" minOccurs="1" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              하나 이상의 피부 고민 값을 담는 컨테이너.
+              URI: https://example.org/skincare#targetSkinConcern
+              필수 | 자식 요소 반복 가능 (1~12개).
+            </xs:documentation>
+          </xs:annotation>
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="targetSkinConcern" type="skc:SkinConcernType"
+                          minOccurs="1" maxOccurs="12"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+
+        <!-- ── 요소 6: skc:keyIngredients ───────────────────── -->
+        <!-- [설계 의도]
+             데이터 사전에서 keyIngredient는 선택적·반복 가능으로 정의된다.
+             각 성분은 INCI명, 기능적 역할, 선택적 농도를 가진 구조화된 복합 타입이다.
+             Darwin Core의 계층적 속성 분류 방식을 참고하여 설계했다 (Draft 3 참조). -->
+        <xs:element name="keyIngredients" minOccurs="0" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              주요 활성 성분들을 담는 컨테이너.
+              URI: https://example.org/skincare#keyIngredient
+              선택적 | 자식 요소 반복 가능 (최대 10개).
+            </xs:documentation>
+          </xs:annotation>
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="keyIngredient" type="skc:KeyIngredientType"
+                          minOccurs="0" maxOccurs="10"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+
+        <!-- ── 요소 7: skc:avoidIngredients ─────────────────── -->
+        <!-- [설계 의도]
+             추천 시 사용자가 기피하는 성분이 포함된 제품을
+             걸러내는 네거티브 필터링에 사용된다.
+             제품이 무향·무알코올인 경우, 래퍼 요소는 존재하되
+             자식 요소 없이 빈 상태로 두어 명시적으로 기피 성분이
+             없음을 표현한다 (요소 자체를 생략하는 것과 구별). -->
+        <xs:element name="avoidIngredients" minOccurs="0" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              제품에 함유된 기피/문제 성분들을 담는 컨테이너.
+              URI: https://example.org/skincare#avoidIngredient
+              선택적 | 자식 요소 반복 가능.
+            </xs:documentation>
+          </xs:annotation>
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="avoidIngredient" type="skc:FlaggedIngredientType"
+                          minOccurs="0" maxOccurs="12"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+
+        <!-- ── 요소 8: skc:textureType ───────────────────────── -->
+        <!-- [설계 의도]
+             제품은 도포 시 하나의 지배적 텍스처를 가지므로 반복 불가.
+             텍스처는 사용자 선호도에 직접 영향을 미치는 요소로
+             (예: 지성 피부 사용자는 워터리/젤 선호),
+             동의어 난립을 막기 위해 통제 어휘를 사용한다. -->
+        <xs:element name="textureType" type="skc:TextureType" minOccurs="0" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              제품 포뮬라의 감각적 텍스처.
+              URI: https://example.org/skincare#textureType
+              부록 F — 텍스처 타입 어휘에서 값을 선택한다.
+              선택적 | 반복 불가.
+            </xs:documentation>
+          </xs:annotation>
+        </xs:element>
+
+        <!-- ── 요소 9: skc:functionalClaims ─────────────────── -->
+        <!-- [설계 의도]
+             하나의 제품이 복수의 인증이나 규제 등급을 동시에 가질 수 있으므로
+             (예: SPF 50+ AND 기능성화장품 AND 크루얼티프리)
+             자식 요소를 반복 허용한다.
+             각 자식은 claimType(통제 어휘) + claimValue(자유 문자열) 쌍이다.
+             claimValue를 xs:string으로 둔 이유는 "50+", "++++"처럼
+             숫자와 텍스트가 혼재하기 때문이다. -->
+        <xs:element name="functionalClaims" minOccurs="0" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              규제 또는 인증 클레임들을 담는 컨테이너.
+              URI: https://example.org/skincare#functionalClaim
+              선택적 | 자식 요소 반복 가능.
+            </xs:documentation>
+          </xs:annotation>
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="functionalClaim" type="skc:FunctionalClaimType"
+                          minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+
+        <!-- ── 요소 10: skc:routineStep ──────────────────────── -->
+        <!-- [설계 의도]
+             모든 제품은 한국 10단계 루틴에서 정확히 하나의 주요 단계에 속한다.
+             필수, 반복 불가. 이 값이 제품을 루틴 순서에 고정시키며,
+             compatibleProduct의 before/after 링크 로직과 함께
+             루틴 시퀀스를 완성하는 역할을 한다. -->
+        <xs:element name="routineStep" type="skc:RoutineStepType" minOccurs="1" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              한국 스킨케어 루틴에서 이 제품이 사용되는 단계.
+              URI: https://example.org/skincare#routineStep
+              부록 G — 루틴 단계 어휘에서 값을 선택한다.
+              필수 | 반복 불가.
+            </xs:documentation>
+          </xs:annotation>
+        </xs:element>
+
+        <!-- ── 요소 11: skc:usageContexts ────────────────────── -->
+        <!-- [설계 의도]
+             하나의 제품이 여러 맥락 차원(계절, 기후, 시간대)에 걸쳐
+             적합할 수 있으므로 자식 요소를 반복 허용한다.
+             각 usageContext는 dimension 속성(차원 카테고리)과
+             텍스트 값(통제 어휘)을 xs:simpleContent로 담는다.
+             이렇게 설계하면 "Season: Summer"처럼 차원과 값의
+             쌍을 단일 요소에서 표현할 수 있다. -->
+        <xs:element name="usageContexts" minOccurs="0" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              환경적 또는 상황적 사용 조건들을 담는 컨테이너.
+              URI: https://example.org/skincare#usageContext
+              선택적 | 자식 요소 반복 가능.
+            </xs:documentation>
+          </xs:annotation>
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="usageContext" type="skc:UsageContextType"
+                          minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+
+        <!-- ── 요소 12: skc:targetAgeRanges ──────────────────── -->
+        <!-- [설계 의도]
+             FOAF의 foaf:age 개념을 차용하여 제품 레벨에 적용했다.
+             FOAF는 공식 XSD를 배포하지 않아 ref= 방식 참조가 불가하므로
+             skc:targetAgeRange로 로컬 재선언하고 출처를 명시한다.
+             실제 개인의 나이가 아닌 추천 대상 사용자 인구통계를 나타낸다.
+             선택적, 반복 가능 — 제품이 여러 연령대에 적합할 수 있다. -->
+        <xs:element name="targetAgeRanges" minOccurs="0" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              타겟 사용자 연령대 값들을 담는 컨테이너.
+              출처: FOAF foaf:age (http://xmlns.com/foaf/0.1/age) — 제품 레벨 적용.
+              FOAF는 공식 XSD를 배포하지 않으므로 로컬 재선언함.
+              선택적 | 자식 요소 반복 가능 (최대 5개).
+            </xs:documentation>
+          </xs:annotation>
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="targetAgeRange" type="skc:AgeRangeType"
+                          minOccurs="0" maxOccurs="5"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+
+        <!-- ── 요소 13: skc:priceSpecification ───────────────── -->
+        <!-- [설계 의도]
+             GoodRelations의 gr:hasPriceSpecification을 모델로 삼았다.
+             GoodRelations XSD가 존재하지만 해당 속성이 전역 요소로 선언되지 않아
+             ref= 방식 참조가 불가하므로 로컬 재선언한다.
+             하위 요소명(hasCurrencyValue, hasCurrency)은
+             GoodRelations 명명 방식을 그대로 따라 출처를 명확히 했다.
+             가격 데이터는 자주 변경되므로 선택적으로 설정했다. -->
+        <xs:element name="priceSpecification" type="skc:PriceSpecificationType" minOccurs="0" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              ISO 4217 통화 코드가 포함된 소매 가격.
+              출처: GoodRelations gr:hasPriceSpecification
+              (http://purl.org/goodrelations/v1#hasPriceSpecification)
+              선택적 | 반복 불가.
+            </xs:documentation>
+          </xs:annotation>
+        </xs:element>
+
+        <!-- ── 요소 14: dc:description ───────────────────────── -->
+        <!-- [설계 의도]
+             상호운용성을 위해 dc:description을 ref= 방식으로 참조한다.
+             자유 텍스트, 선택적, 반복 불가.
+             통제 어휘로 담기 어려운 세부 정보(하이브리드 카테고리,
+             특이 사항 등)를 기술하는 용도로 사용한다. -->
+        <xs:element ref="dc:description" minOccurs="0" maxOccurs="1"/>
+
+        <!-- ── 요소 15: skc:compatibleProducts ───────────────── -->
+        <!-- [설계 의도]
+             코퍼스 Object #10(스킨케어 루틴 세트)을 메타데이터로 표현하기 위한 요소다.
+             각 compatibleProduct 자식은 productRef(xs:IDREF로 다른 레코드 참조)와
+             position(before/after)을 담는다.
+             xs:IDREF를 사용하면 참조 대상 레코드가 문서 내에 실제로 존재하는지
+             파서 수준에서 검증된다. -->
+        <xs:element name="compatibleProducts" minOccurs="0" maxOccurs="1">
+          <xs:annotation>
+            <xs:documentation>
+              동일 루틴에서 함께 사용하도록 추천된 다른 제품으로의 링크들을 담는 컨테이너.
+              URI: https://example.org/skincare#compatibleProduct
+              선택적 | 자식 요소 반복 가능.
+            </xs:documentation>
+          </xs:annotation>
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="compatibleProduct" type="skc:CompatibleProductType"
+                          minOccurs="0" maxOccurs="unbounded"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+
+      </xs:sequence>
+
+      <!-- 레코드 레벨 속성: productID -->
+      <!-- [설계 의도]
+           각 레코드에 고유 식별자 속성을 부여하여
+           compatibleProduct/productRef가 특정 레코드를 정확히 가리킬 수 있게 한다.
+           xs:ID 타입은 문서 내 고유성을 XSD 파서 수준에서 보장한다.
+           use="required"로 모든 레코드에 반드시 존재하도록 강제한다. -->
+      <xs:attribute name="productID" type="xs:ID" use="required"/>
+
+    </xs:complexType>
+  </xs:element>
+
+
+  <!-- ============================================================
+       복합 타입(complexType) 정의
+       ============================================================ -->
+
+  <!-- skc:KeyIngredientType
+       [설계 의도]
+       각 성분 항목은 INCI명(자유 텍스트), 기능적 역할(통제 어휘),
+       선택적 농도(%)의 세 부분으로 구성된다.
+       텍스트 + 속성 조합이 아닌 복수의 자식 요소가 필요하므로
+       xs:simpleContent가 아닌 xs:sequence를 사용한다.
+  -->
+  <xs:complexType name="KeyIngredientType">
+    <xs:annotation>
+      <xs:documentation>
+        구조화된 성분 항목: INCI명, 기능적 역할, 선택적 농도.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="inci" type="xs:string" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>성분의 INCI명 (International Nomenclature of Cosmetic Ingredients).</xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="role" type="skc:IngredientRoleType" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>성분의 기능적 역할. 부록 D — 성분 역할 어휘에서 값을 선택한다.</xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <!-- concentration: 숫자 값과 단위 레이블을 동시에 담아야 하므로
+           xs:simpleContent + xs:extension으로 xs:decimal 기반 타입에
+           unit 속성을 추가하는 방식을 선택했다. -->
+      <xs:element name="concentration" minOccurs="0" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>성분의 선택적 농도 값 (퍼센트 단위). unit 속성에 "percent" 입력.</xs:documentation>
+        </xs:annotation>
+        <xs:complexType>
+          <xs:simpleContent>
+            <xs:extension base="xs:decimal">
+              <xs:attribute name="unit" type="xs:string" use="required"/>
+            </xs:extension>
+          </xs:simpleContent>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- skc:FunctionalClaimType
+       [설계 의도]
+       각 클레임은 통제 어휘에서 선택하는 claimType과,
+       자유 문자열인 claimValue로 구성된다.
+       claimValue를 xs:string으로 설정한 이유는
+       "50+"(SPF), "++++"(PA), "자외선차단"(기능성화장품)처럼
+       텍스트와 숫자·기호가 혼재하기 때문이다.
+  -->
+  <xs:complexType name="FunctionalClaimType">
+    <xs:annotation>
+      <xs:documentation>
+        공식 제품 클레임: 통제된 클레임 타입과 자유 문자열 클레임 값의 쌍.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="claimType" type="skc:ClaimTypeType" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>클레임의 종류. 클레임 타입 어휘에서 값을 선택한다.</xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="claimValue" type="xs:string" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>클레임의 구체적 값 (예: SPF → "50+", PA → "++++", 기능성화장품 → "자외선차단").</xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- skc:UsageContextType
+       [설계 의도]
+       사용 맥락은 차원(dimension)과 값(value)의 쌍으로 구성된다.
+       xs:simpleContent + xs:extension을 사용하면 하나의 요소가
+       텍스트 콘텐츠(값)와 속성(차원 카테고리)을 동시에 가질 수 있다.
+       예: <usageContext dimension="Season">Summer</usageContext>
+       이렇게 하면 별도의 자식 요소 없이 차원-값 쌍을 간결하게 표현할 수 있다.
+  -->
+  <xs:complexType name="UsageContextType">
+    <xs:annotation>
+      <xs:documentation>
+        환경적 또는 상황적 사용 조건을 나타내는 차원-값 쌍.
+        dimension 속성으로 차원을, 텍스트 콘텐츠로 값을 표현한다.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:simpleContent>
+      <xs:extension base="skc:UsageContextValueType">
+        <!-- dimension 속성: Season, Climate 등 차원 카테고리를 담는다.
+             모든 맥락 항목이 어느 차원에 속하는지 명확하도록
+             use="required"로 필수 설정한다. -->
+        <xs:attribute name="dimension" type="skc:ContextDimensionType" use="required"/>
+      </xs:extension>
+    </xs:simpleContent>
+  </xs:complexType>
+
+  <!-- skc:PriceSpecificationType
+       [설계 의도]
+       GoodRelations의 하위 요소 명명 방식을 그대로 따라
+       hasCurrencyValue, hasCurrency로 선언한다.
+       금액에 xs:decimal을 사용해 숫자만 입력되도록 하고,
+       통화 코드는 CurrencyType 열거형으로 허용 범위를 제한한다.
+  -->
+  <xs:complexType name="PriceSpecificationType">
+    <xs:annotation>
+      <xs:documentation>
+        통화가 포함된 소매 가격. GoodRelations gr:hasPriceSpecification 모델 기반.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="hasCurrencyValue" type="xs:decimal" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>숫자 가격 금액 (xs:decimal).</xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="hasCurrency" type="skc:CurrencyType" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>ISO 4217 통화 코드 (KRW, USD, EUR 중 선택).</xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+  <!-- skc:CompatibleProductType
+       [설계 의도]
+       productRef에 xs:IDREF를 사용하면 참조 대상 레코드의 productID가
+       같은 XML 문서 내에 실제로 존재하는지 파서가 자동으로 검증한다.
+       단순 xs:string 대신 xs:IDREF를 선택한 이유는 이 참조 무결성 검증 때문이다.
+       position(before/after)은 루틴 내 순서를 명시한다.
+  -->
+  <xs:complexType name="CompatibleProductType">
+    <xs:annotation>
+      <xs:documentation>
+        동일 루틴 내 호환 제품에 대한 참조와 루틴 내 순서 정보.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:sequence>
+      <xs:element name="productRef" type="xs:IDREF" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>같은 문서 내 다른 skincareProduct 레코드의 productID를 참조한다 (xs:IDREF).</xs:documentation>
+        </xs:annotation>
+      </xs:element>
+      <xs:element name="position" type="skc:PositionType" minOccurs="1" maxOccurs="1">
+        <xs:annotation>
+          <xs:documentation>호환 제품이 이 제품보다 먼저(before) 또는 나중에(after) 사용되는지 여부.</xs:documentation>
+        </xs:annotation>
+      </xs:element>
+    </xs:sequence>
+  </xs:complexType>
+
+
+  <!-- ============================================================
+       단순 타입(simpleType) 정의 — 통제 어휘
+
+       [설계 의도]
+       Draft 2~3의 모든 통제 어휘를 xs:simpleType + xs:restriction +
+       xs:enumeration으로 구현한다.
+       유효성 검사 시 정확히 일치하는 값만 허용되어 오타나
+       동의어 변형이 데이터셋에 유입되는 것을 원천 차단한다.
+       이는 추천 매칭 로직의 안정성을 위한 핵심 설계 결정이다.
+       ============================================================ -->
+
+  <!-- 브랜드 통제 어휘 (요소 2)
+       테스트 코퍼스에 포함된 브랜드만 허용한다.
+       코퍼스 확장 시 이 목록을 업데이트해야 한다. -->
+  <xs:simpleType name="BrandType">
+    <xs:annotation>
+      <xs:documentation>
+        테스트 코퍼스에 포함된 한국 스킨케어 브랜드 통제 어휘.
+        출처: 요소 2 — schema:brand (Draft 3).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Round Lab"/>
+      <xs:enumeration value="COSRX"/>
+      <xs:enumeration value="Anua"/>
+      <xs:enumeration value="Beauty of Joseon"/>
+      <xs:enumeration value="Innisfree"/>
+      <xs:enumeration value="HERA"/>
+      <xs:enumeration value="Some By Mi"/>
+      <xs:enumeration value="Klairs"/>
+      <xs:enumeration value="Laneige"/>
+      <xs:enumeration value="Sulwhasoo"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 부록 A — 스킨케어 카테고리 어휘 (요소 3)
+       한국 뷰티 업계의 관행적 카테고리 분류를 따른다. -->
+  <xs:simpleType name="ProductCategoryType">
+    <xs:annotation>
+      <xs:documentation>
+        한국 스킨케어 제품 카테고리 통제 어휘.
+        출처: 부록 A — 스킨케어 카테고리 어휘 (Draft 3).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Cleanser"/>
+      <xs:enumeration value="Toner / Softener"/>
+      <xs:enumeration value="Essence"/>
+      <xs:enumeration value="Serum"/>
+      <xs:enumeration value="Ampoule"/>
+      <xs:enumeration value="Lotion (Emulsion)"/>
+      <xs:enumeration value="Cream"/>
+      <xs:enumeration value="Eye Cream"/>
+      <xs:enumeration value="Sunscreen"/>
+      <xs:enumeration value="Mask Sheet"/>
+      <xs:enumeration value="Sleeping Pack"/>
+      <xs:enumeration value="Exfoliator"/>
+      <xs:enumeration value="Mist"/>
+      <xs:enumeration value="Primer"/>
+      <xs:enumeration value="Cushion Foundation"/>
+      <xs:enumeration value="BB Cream"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 부록 B — 피부 타입 어휘 (요소 4) -->
+  <xs:simpleType name="SkinTypeType">
+    <xs:annotation>
+      <xs:documentation>
+        피부 타입 통제 어휘.
+        출처: 부록 B — 피부 타입 어휘 (Draft 3).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Dry"/>
+      <xs:enumeration value="Oily"/>
+      <xs:enumeration value="Combination"/>
+      <xs:enumeration value="Sensitive"/>
+      <xs:enumeration value="Normal"/>
+      <xs:enumeration value="Acne-prone"/>
+      <xs:enumeration value="Mature"/>
+      <xs:enumeration value="All skin types"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 부록 C — 피부 고민 어휘 (요소 5) -->
+  <xs:simpleType name="SkinConcernType">
+    <xs:annotation>
+      <xs:documentation>
+        제품이 해결하는 피부 고민 통제 어휘.
+        출처: 부록 C — 피부 고민 어휘 (Draft 3).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Hydration"/>
+      <xs:enumeration value="Brightening"/>
+      <xs:enumeration value="Anti-aging"/>
+      <xs:enumeration value="Pore minimizing"/>
+      <xs:enumeration value="Sebum control"/>
+      <xs:enumeration value="Acne / Blemish"/>
+      <xs:enumeration value="Soothing / Redness relief"/>
+      <xs:enumeration value="Barrier repair"/>
+      <xs:enumeration value="Hyperpigmentation"/>
+      <xs:enumeration value="Sun protection"/>
+      <xs:enumeration value="Firming"/>
+      <xs:enumeration value="Dark circles"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 부록 D — 성분 역할 어휘 (요소 6) -->
+  <xs:simpleType name="IngredientRoleType">
+    <xs:annotation>
+      <xs:documentation>
+        주요 성분의 기능적 역할 통제 어휘.
+        출처: 부록 D — 성분 역할 어휘 (Draft 3).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Humectant"/>
+      <xs:enumeration value="Emollient"/>
+      <xs:enumeration value="Occlusive"/>
+      <xs:enumeration value="Antioxidant"/>
+      <xs:enumeration value="Exfoliant (AHA/BHA)"/>
+      <xs:enumeration value="Anti-inflammatory"/>
+      <xs:enumeration value="Brightening agent"/>
+      <xs:enumeration value="UV filter"/>
+      <xs:enumeration value="Antimicrobial"/>
+      <xs:enumeration value="Film-forming"/>
+      <xs:enumeration value="Preservative"/>
+      <xs:enumeration value="Fragrance"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 부록 E — 기피 성분 어휘 (요소 7) -->
+  <xs:simpleType name="FlaggedIngredientType">
+    <xs:annotation>
+      <xs:documentation>
+        흔히 문제가 되는 기피 성분 통제 어휘.
+        출처: 부록 E — 기피 성분 어휘 (Draft 3).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Fragrance / Parfum"/>
+      <xs:enumeration value="Alcohol denat."/>
+      <xs:enumeration value="Parabens"/>
+      <xs:enumeration value="Sulfates (SLS/SLES)"/>
+      <xs:enumeration value="Silicone"/>
+      <xs:enumeration value="Essential oils"/>
+      <xs:enumeration value="Retinol"/>
+      <xs:enumeration value="Hydroquinone"/>
+      <xs:enumeration value="Oxybenzone"/>
+      <xs:enumeration value="Formaldehyde releasers"/>
+      <xs:enumeration value="Mineral oil"/>
+      <xs:enumeration value="Artificial colorants"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 부록 F — 텍스처 타입 어휘 (요소 8) -->
+  <xs:simpleType name="TextureType">
+    <xs:annotation>
+      <xs:documentation>
+        제품 텍스처 타입 통제 어휘.
+        출처: 부록 F — 텍스처 타입 어휘 (Draft 3).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Watery"/>
+      <xs:enumeration value="Gel"/>
+      <xs:enumeration value="Lightweight lotion"/>
+      <xs:enumeration value="Rich lotion"/>
+      <xs:enumeration value="Cream"/>
+      <xs:enumeration value="Balm"/>
+      <xs:enumeration value="Oil"/>
+      <xs:enumeration value="Serum (thin)"/>
+      <xs:enumeration value="Serum (viscous)"/>
+      <xs:enumeration value="Foam"/>
+      <xs:enumeration value="Cushion"/>
+      <xs:enumeration value="Stick"/>
+      <xs:enumeration value="Mist"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 클레임 타입 어휘 (요소 9)
+       한국 기능성화장품법상 분류와 국제 인증 기준을 모두 포함했다. -->
+  <xs:simpleType name="ClaimTypeType">
+    <xs:annotation>
+      <xs:documentation>
+        기능적 또는 규제 클레임 타입 통제 어휘.
+        출처: 클레임 타입 어휘 (Draft 3, 요소 9).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="SPF"/>
+      <xs:enumeration value="PA"/>
+      <xs:enumeration value="기능성화장품"/>
+      <xs:enumeration value="Dermatologist-tested"/>
+      <xs:enumeration value="Hypoallergenic"/>
+      <xs:enumeration value="Vegan"/>
+      <xs:enumeration value="Cruelty-free"/>
+      <xs:enumeration value="EWG verified"/>
+      <xs:enumeration value="Fragrance-free"/>
+      <xs:enumeration value="Non-comedogenic"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 부록 G — 루틴 단계 어휘 (요소 10)
+       한국 10단계 루틴의 각 단계를 번호와 명칭으로 함께 표현한다.
+       번호와 명칭을 결합한 이유는 검색과 가독성을 동시에 확보하기 위해서다. -->
+  <xs:simpleType name="RoutineStepType">
+    <xs:annotation>
+      <xs:documentation>
+        한국 10단계 스킨케어 루틴 단계 통제 어휘.
+        출처: 부록 G — 루틴 단계 어휘 (Draft 3).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Step 1: Oil cleanser"/>
+      <xs:enumeration value="Step 2: Water-based cleanser"/>
+      <xs:enumeration value="Step 3: Exfoliator"/>
+      <xs:enumeration value="Step 4: Toner"/>
+      <xs:enumeration value="Step 5: Essence"/>
+      <xs:enumeration value="Step 6: Serum / Ampoule"/>
+      <xs:enumeration value="Step 7: Sheet mask"/>
+      <xs:enumeration value="Step 8: Eye cream"/>
+      <xs:enumeration value="Step 9: Moisturizer"/>
+      <xs:enumeration value="Step 10: Sunscreen (AM) / Sleeping pack (PM)"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 맥락 차원 어휘 (요소 11)
+       usageContext 요소의 dimension 속성에 사용된다. -->
+  <xs:simpleType name="ContextDimensionType">
+    <xs:annotation>
+      <xs:documentation>
+        사용 맥락 차원 카테고리 통제 어휘.
+        출처: 맥락 차원 어휘 (Draft 3, 요소 11).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Season"/>
+      <xs:enumeration value="Climate"/>
+      <xs:enumeration value="Time of day"/>
+      <xs:enumeration value="Setting"/>
+      <xs:enumeration value="Special condition"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 사용 맥락 값 어휘 (요소 11)
+       [설계 의도]
+       모든 차원에 걸친 맥락 값들을 하나의 simpleType으로 통합했다.
+       차원별로 별도 타입을 만들면 key/keyref 제약이 필요한
+       더 복잡한 설계가 요구된다. 트레이드오프는 교차 차원 유효성 검사
+       (예: Season에는 Spring/Summer/… 만 허용)를 XSD 1.0에서
+       강제하지 못하고 문서로만 명시해야 한다는 점이다. -->
+  <xs:simpleType name="UsageContextValueType">
+    <xs:annotation>
+      <xs:documentation>
+        모든 차원에 걸친 사용 맥락 값 통제 어휘.
+        계절: Spring, Summer, Fall, Winter, Year-round.
+        기후: Humid, Dry, Cold, Hot, Temperate.
+        시간대: AM routine, PM routine, Both.
+        장소: Indoor, Outdoor, Travel.
+        특수 조건: Post-procedure, Pre-event, Pregnancy-safe.
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <!-- 계절 -->
+      <xs:enumeration value="Spring"/>
+      <xs:enumeration value="Summer"/>
+      <xs:enumeration value="Fall"/>
+      <xs:enumeration value="Winter"/>
+      <xs:enumeration value="Year-round"/>
+      <!-- 기후 -->
+      <xs:enumeration value="Humid"/>
+      <xs:enumeration value="Dry"/>
+      <xs:enumeration value="Cold"/>
+      <xs:enumeration value="Hot"/>
+      <xs:enumeration value="Temperate"/>
+      <!-- 시간대 -->
+      <xs:enumeration value="AM routine"/>
+      <xs:enumeration value="PM routine"/>
+      <xs:enumeration value="Both"/>
+      <!-- 장소 -->
+      <xs:enumeration value="Indoor"/>
+      <xs:enumeration value="Outdoor"/>
+      <xs:enumeration value="Travel"/>
+      <!-- 특수 조건 -->
+      <xs:enumeration value="Post-procedure"/>
+      <xs:enumeration value="Pre-event"/>
+      <xs:enumeration value="Pregnancy-safe"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 연령대 어휘 (요소 12) -->
+  <xs:simpleType name="AgeRangeType">
+    <xs:annotation>
+      <xs:documentation>
+        타겟 사용자 연령대 통제 어휘.
+        출처: 요소 12 — foaf:age를 제품 레벨에 적용 (Draft 3).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Teens (13-19)"/>
+      <xs:enumeration value="20s"/>
+      <xs:enumeration value="30s"/>
+      <xs:enumeration value="40s+"/>
+      <xs:enumeration value="All ages"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 통화 어휘 (요소 13)
+       [설계 의도]
+       한국 스킨케어 시장과 관련된 세 가지 ISO 4217 코드로만 제한한다.
+       패턴 방식(예: [A-Z]{3})을 쓰면 임의의 3자 코드를 모두 허용하지만,
+       이 코퍼스에서는 허용 범위를 명시적으로 제한하는 것이
+       데이터 품질 관리 측면에서 더 적합하다고 판단했다. -->
+  <xs:simpleType name="CurrencyType">
+    <xs:annotation>
+      <xs:documentation>
+        한국 스킨케어 시장과 관련된 ISO 4217 통화 코드.
+        출처: 요소 13 — gr:hasPriceSpecification (Draft 3).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="KRW"/>
+      <xs:enumeration value="USD"/>
+      <xs:enumeration value="EUR"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- 순서 어휘 (요소 15) -->
+  <xs:simpleType name="PositionType">
+    <xs:annotation>
+      <xs:documentation>
+        호환 제품이 현재 제품보다 루틴에서 먼저(before) 또는 나중에(after) 사용되는지 여부.
+        출처: 요소 15 — skc:compatibleProduct (Draft 3).
+      </xs:documentation>
+    </xs:annotation>
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="before"/>
+      <xs:enumeration value="after"/>
+    </xs:restriction>
+  </xs:simpleType>
+
+</xs:schema>
