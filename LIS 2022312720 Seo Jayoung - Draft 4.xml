@@ -24,7 +24,7 @@
   xmlns="https://example.org/skincare#"
   xmlns:dc="http://purl.org/dc/elements/1.1/"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-  xsi:schemaLocation="https://example.org/skincare# skincare_schema.xsd">
+  xsi:schemaLocation="https://jayoung-seo3.github.io/skincare-schema/">
 
 
   <!-- ============================================================
